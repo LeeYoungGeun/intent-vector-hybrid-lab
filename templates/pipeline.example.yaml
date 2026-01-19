@@ -1,0 +1,32 @@
+# pipeline.example.yaml
+# 파이프라인 조합과 파라미터(가중치/TopK/필터)를 정의합니다.
+
+pipelines:
+  dense_only:
+    steps: [embedding, vector_retrieval]
+    params:
+      top_k: 50
+
+  hybrid:
+    steps: [embedding, vector_retrieval, bm25, fusion]
+    params:
+      top_k_dense: 50
+      top_k_bm25: 50
+      fusion:
+        method: rrf
+        rrf_k: 60
+
+  hybrid_rerank:
+    steps: [embedding, vector_retrieval, bm25, fusion, rerank]
+    params:
+      top_k_fused: 50
+      rerank_top_k: 20
+
+  hybrid_rerank_filter:
+    steps: [embedding, vector_retrieval, bm25, fusion, rerank, filter]
+    params:
+      rerank_top_k: 30
+      filter:
+        ruleset_id: default
+        min_score: 0.35
+        hard_category_filter: true

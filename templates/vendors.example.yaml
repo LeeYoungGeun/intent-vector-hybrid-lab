@@ -1,0 +1,78 @@
+vendor_sets:
+  baseline:
+    embedding:
+      provider: openai
+      model: text-embedding-3-small
+    vector_db:
+      provider: qdrant
+      endpoint_env: QDRANT_URL
+      api_key_env: QDRANT_API_KEY
+      index: products
+    bm25:
+      provider: elastic
+      endpoint_env: ELASTIC_URL
+      api_key_env: ELASTIC_API_KEY
+      index: products
+    rerank:
+      provider: cohere
+      model: rerank-v4.0-fast
+  frontier:
+    embedding:
+      provider: openai
+      model: text-embedding-3-large
+    vector_db:
+      provider: pinecone
+      endpoint_env: PINECONE_HOST
+      api_key_env: PINECONE_API_KEY
+      index: products
+    bm25:
+      provider: azure_ai_search
+      endpoint_env: AZURE_SEARCH_ENDPOINT
+      api_key_env: AZURE_SEARCH_KEY
+      index: products
+    rerank:
+      provider: cohere
+      model: rerank-v4.0-pro
+  local_mock:
+    embedding:
+      provider: mock
+      dim: 128
+    vector_db:
+      provider: local
+    bm25:
+      provider: local
+    rerank:
+      provider: mock
+  openai_only:
+    embedding:
+      provider: openai
+      model: text-embedding-3-small
+    vector_db:
+      provider: qdrant
+    bm25:
+      provider: elastic
+    fusion:
+      provider: rrf
+      k: 60
+    rerank:
+      provider: mock
+    filter:
+      provider: rules
+      min_score: 0.0
+  google_only:
+    embedding:
+      provider: google
+      model: gemini-embedding-001
+      output_dimensionality: 768
+    vector_db:
+      provider: qdrant
+    bm25:
+      provider: elastic
+    fusion:
+      provider: rrf
+      k: 60
+    rerank:
+      provider: mock
+    filter:
+      provider: rules
+      min_score: 0.0
