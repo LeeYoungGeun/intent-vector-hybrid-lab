@@ -1,34 +1,35 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List
+from typing import Dict, List, Optional
 
 
-@dataclass(frozen=True)
+@dataclass
 class Document:
     doc_id: str
     title: str
     text: str
     category: str = ""
-    meta: Dict[str, Any] = field(default_factory=dict)
+    meta: Dict[str, str] = field(default_factory=dict)
 
 
-@dataclass(frozen=True)
-class ScoredDoc:
-    doc_id: str
-    score: float
-    source: str = ""
-
-
-@dataclass(frozen=True)
+@dataclass
 class QueryCase:
     case_id: str
     raw_text: str
     intent_text: str
-    expected_doc_ids: List[str] = field(default_factory=list)
+    expected_doc_ids: List[str] = field(default_factory=list)  # ✅ gold doc_id list
+    bm25_query_text: str = ""  # ✅ BM25 input (expanded keywords)
     expected_category: str = ""
     needs_clarification: bool = False
     notes: str = ""
+
+
+@dataclass
+class ScoredDoc:
+    doc_id: str
+    score: float
+    extra: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass

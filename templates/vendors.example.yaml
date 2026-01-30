@@ -43,36 +43,94 @@ vendor_sets:
       provider: local
     rerank:
       provider: mock
+
+  bm25_local:
+    embedding:
+      provider: mock
+      dim: 128
+    vector_db:
+      provider: local
+    bm25:
+      provider: builtin
+    rerank:
+      provider: mock
+
+  # Cohere API key 없이도 rerank 파이프라인을 실행할 수 있는 세트(=mock rerank)
   openai_only:
     embedding:
       provider: openai
       model: text-embedding-3-small
     vector_db:
-      provider: qdrant
+      provider: local
     bm25:
-      provider: elastic
-    fusion:
-      provider: rrf
-      k: 60
+      provider: builtin
     rerank:
       provider: mock
-    filter:
-      provider: rules
-      min_score: 0.0
+
+  # Gemini Embeddings로 교체 + mock rerank
   google_only:
     embedding:
       provider: google
       model: gemini-embedding-001
-      output_dimensionality: 768
+      # output_dimensionality: 768
     vector_db:
-      provider: qdrant
+      provider: local
     bm25:
-      provider: elastic
-    fusion:
-      provider: rrf
-      k: 60
+      provider: builtin
     rerank:
       provider: mock
-    filter:
-      provider: rules
-      min_score: 0.0
+
+  # (1) BM25 ONLY - Local builtin BM25
+  exp_bm25_local:
+    embedding:
+      provider: mock
+      dim: 128
+    vector_db:
+      provider: local
+    bm25:
+      provider: builtin
+    rerank:
+      provider: mock
+
+  # (2) DENSE ONLY - OpenAI Embedding + Qdrant Vector DB
+  # 필요 env:
+  # - OPENAI_API_KEY
+  # - QDRANT_URL
+  # - QDRANT_API_KEY (클라우드/보안 설정이면 필요, 로컬이면 빈 값/미사용일 수 있음)
+  exp_dense_qdrant:
+    embedding:
+      provider: openai
+      model: text-embedding-3-small
+    vector_db:
+      provider: qdrant
+      endpoint_env: QDRANT_URL
+      api_key_env: QDRANT_API_KEY
+      index: products
+    bm25:
+      provider: mock
+    rerank:
+      provider: mock
+
+  # (3) HYBRID - OpenAI Embedding + Qdrant + Elastic BM25
+  # 필요 env:
+  # - OPENAI_API_KEY
+  # - QDRANT_URL
+  # - QDRANT_API_KEY
+  # - ELASTIC_URL
+  # - ELASTIC_API_KEY (보안 설정이면 필요)
+  exp_hybrid_qdrant_elastic:
+    embedding:
+      provider: openai
+      model: text-embedding-3-small
+    vector_db:
+      provider: qdrant
+      endpoint_env: QDRANT_URL
+      api_key_env: QDRANT_API_KEY
+      index: products
+    bm25:
+      provider: elastic
+      endpoint_env: ELASTIC_URL
+      api_key_env: ELASTIC_API_KEY
+      index: products
+    rerank:
+      provider: mock

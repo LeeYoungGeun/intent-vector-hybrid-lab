@@ -1,12 +1,7 @@
-# 맨 위 import 부분을 이렇게 변경
 from __future__ import annotations
-from dataclasses import dataclass
-from typing import List, Protocol
 
-try:
-    import cohere  # type: ignore
-except Exception:
-    cohere = None  # cohere 미설치 허용
+from dataclasses import dataclass
+from typing import Dict, List, Protocol
 
 from ivhl.core.tokenize import tokenize
 from ivhl.core.types import Document, ScoredDoc

@@ -28,41 +28,6 @@ ivhl run \
 - `summary.json`: 지표 요약
 - `report.md`: 사람이 보기 쉬운 리포트
 
-## OpenAI vs Google 임베딩 비교 실행
-
-`.env` 파일에 `OPENAI_API_KEY`와 `GOOGLE_API_KEY`(또는 `GEMINI_API_KEY`)를 설정한 후:
-
-```bash
-# OpenAI 임베딩으로 실행
-ivhl run \
-  --pipeline-id hybrid \
-  --vendor-set openai_only \
-  --catalog data/catalog.example.tsv \
-  --testcases templates/testcases.example.tsv \
-  --out-dir runs
-
-# Google 임베딩으로 실행
-ivhl run \
-  --pipeline-id hybrid \
-  --vendor-set google_only \
-  --catalog data/catalog.example.tsv \
-  --testcases templates/testcases.example.tsv \
-  --out-dir runs
-```
-
-## Cohere 없이 Rerank 파이프라인 실행 (mock rerank)
-
-`openai_only` 또는 `google_only` vendor-set은 `rerank: {provider: mock}`을 사용하므로 Cohere API 키 없이도 `hybrid_rerank_filter` 파이프라인을 실행할 수 있습니다:
-
-```bash
-ivhl run \
-  --pipeline-id hybrid_rerank_filter \
-  --vendor-set openai_only \
-  --catalog data/catalog.example.tsv \
-  --testcases templates/testcases.example.tsv \
-  --out-dir runs
-```
-
 ## 범위
 - (1) 임베딩
 - (2) 벡터 리트리벌
@@ -72,4 +37,40 @@ ivhl run \
 
 ## 주의
 - 이 레포는 **API 키를 요구하지 않는 로컬 mock**을 기본 제공하며, 실제 벤더 연동은 어댑터 구현이 필요합니다.
-- API 키는 `.env` 파일에 저장하고, 로그나 출력에 절대 노출하지 마세요.
+
+## OpenAI vs Google 임베딩 비교
+
+### 1) 환경변수 설정
+
+프로젝트 루트에 `.env` 파일을 만들고 다음 중 필요한 키를 넣습니다.
+
+- `OPENAI_API_KEY`
+- `GOOGLE_API_KEY` 또는 `GEMINI_API_KEY`
+
+(`templates/.env.example` 참고)
+
+### 2) vendor-set 확인
+
+```bash
+ivhl list
+```
+
+`openai_only`, `google_only`가 보이면 정상입니다.
+
+### 3) OpenAI 임베딩으로 실행
+
+```bash
+ivhl run --pipeline-id hybrid --vendor-set openai_only --catalog data/catalog.example.tsv --testcases templates/testcases.example.tsv --out-dir runs
+```
+
+### 4) Google 임베딩으로 실행
+
+```bash
+ivhl run --pipeline-id hybrid --vendor-set google_only --catalog data/catalog.example.tsv --testcases templates/testcases.example.tsv --out-dir runs
+```
+
+### 5) Cohere 없이 rerank 파이프라인 실행(mock rerank)
+
+```bash
+ivhl run --pipeline-id hybrid_rerank_filter --vendor-set openai_only --catalog data/catalog.example.tsv --testcases templates/testcases.example.tsv --out-dir runs
+```

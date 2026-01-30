@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import shutil
 import time
-from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List
 
 from dotenv import load_dotenv
 
@@ -19,7 +18,7 @@ from ivhl.core.config import PipelineSpec, VendorSet
 from ivhl.core.io import load_catalog_tsv, load_testcases_tsv
 from ivhl.core.metrics import aggregate, mrr, ndcg_at_k, precision_at_k, recall_at_k
 from ivhl.core.runlog import RunLogger, write_json
-from ivhl.core.types import Document, QueryCase, RunArtifacts, ScoredDoc
+from ivhl.core.types import Document, RunArtifacts, ScoredDoc
 
 
 def _mk_run_id() -> str:
@@ -61,6 +60,30 @@ def _docs_by_id(docs: List[Document]) -> Dict[str, Document]:
     return {d.doc_id: d for d in docs}
 
 
+def _assert_bm25_only_config(vendor_set: VendorSet, pipeline: PipelineSpec) -> None:
+    if pipeline.pipeline_id != "bm25_only":
+        return
+    emb = (vendor_set.config.get("embedding") or {"provider": "mock"})
+    if emb.get("provider") != "mock":
+        raise RuntimeError(
+            f"[GUARD] bm25_only인데 embedding provider가 mock이 아님: "
+            f"vendor_set={vendor_set.vendor_set_id}, embedding={emb}"
+        )
+    forbidden = {"dense", "fusion", "rerank"}
+    bad = forbidden.intersection(set(pipeline.steps))
+    if bad:
+        raise RuntimeError(f"[GUARD] bm25_only인데 금지 step 포함: {sorted(bad)} / steps={pipeline.steps}")
+    if "bm25" not in pipeline.steps:
+        raise RuntimeError(f"[GUARD] bm25_only인데 steps에 bm25가 없음: steps={pipeline.steps}")
+
+
+def _pick_text(*cands: str) -> str:
+    for x in cands:
+        if (x or "").strip():
+            return x.strip()
+    return ""
+
+
 def run_benchmark(
     *,
     vendor_set: VendorSet,
@@ -80,25 +103,39 @@ def run_benchmark(
     cases = load_testcases_tsv(testcases_path)
     docs_map = _docs_by_id(docs)
 
-    # Build adapters
-    emb_cfg = (vendor_set.config.get("embedding") or {"provider": "mock"})
-    embedding = build_embedding_adapter(emb_cfg)
+    _assert_bm25_only_config(vendor_set, pipeline)
 
-    # Embed docs once (use embed_documents if available for task_type support)
-    t0 = time.time()
-    doc_texts = [(d.title + " " + d.text).strip() for d in docs]
-    if hasattr(embedding, "embed_documents"):
-        doc_vecs_list = embedding.embed_documents(doc_texts)
-    else:
-        doc_vecs_list = embedding.embed_texts(doc_texts)
-    doc_vecs = {d.doc_id: v for d, v in zip(docs, doc_vecs_list)}
-    embed_docs_ms = (time.time() - t0) * 1000
+    use_dense = "dense" in pipeline.steps
+    use_bm25 = "bm25" in pipeline.steps
 
-    vec_retriever = BruteForceVectorRetriever(docs=docs, doc_vecs=doc_vecs)
+    if "fusion" in pipeline.steps and not (use_dense and use_bm25):
+        raise RuntimeError(f"[GUARD] fusion은 dense+bm25 둘 다 필요: steps={pipeline.steps}")
+
+    # Build adapters only when needed
+    embedding = None
+    vec_retriever: BruteForceVectorRetriever | None = None
+    embed_docs_ms = 0.0
+
+    if use_dense:
+        emb_cfg = (vendor_set.config.get("embedding") or {"provider": "mock"})
+        embedding = build_embedding_adapter(emb_cfg)
+
+        t0 = time.time()
+        doc_texts = [(d.title + " " + d.text).strip() for d in docs]
+        if hasattr(embedding, "embed_documents"):
+            doc_vecs_list = embedding.embed_documents(doc_texts)  # type: ignore[attr-defined]
+        else:
+            doc_vecs_list = embedding.embed_texts(doc_texts)
+        doc_vecs = {d.doc_id: v for d, v in zip(docs, doc_vecs_list)}
+        embed_docs_ms = (time.time() - t0) * 1000
+        vec_retriever = BruteForceVectorRetriever(docs=docs, doc_vecs=doc_vecs)
+
     bm25 = LocalBM25(docs=docs)
 
-    rerank_cfg = (vendor_set.config.get("rerank") or {"provider": "mock"})
-    reranker = build_reranker(rerank_cfg)
+    reranker = None
+    if "rerank" in pipeline.steps:
+        rerank_cfg = (vendor_set.config.get("rerank") or {"provider": "mock"})
+        reranker = build_reranker(rerank_cfg)
 
     logger.log(
         "run_start",
@@ -114,12 +151,16 @@ def run_benchmark(
 
     per_case_metrics: List[Dict[str, float]] = []
     n_skipped = 0
+    n_bad_gold = 0
 
     for c in cases:
+        intent_text = _pick_text(c.intent_text, c.raw_text)
+
         case_payload: Dict[str, Any] = {
             "case_id": c.case_id,
             "raw_text": c.raw_text,
-            "intent_text": c.intent_text,
+            "intent_text": intent_text,
+            "bm25_query_text": getattr(c, "bm25_query_text", "") or "",
             "expected_doc_ids": c.expected_doc_ids,
             "expected_category": c.expected_category,
             "needs_clarification": c.needs_clarification,
@@ -128,67 +169,86 @@ def run_benchmark(
             "vendor_set": vendor_set.vendor_set_id,
         }
 
-        if c.needs_clarification or not c.expected_doc_ids:
+        if c.needs_clarification:
             n_skipped += 1
             case_payload["status"] = "SKIPPED"
             logger.log("case", case_payload)
             continue
 
-        # Stage 1: embed query (use embed_query if available for task_type support)
-        t1 = time.time()
-        if hasattr(embedding, "embed_query"):
-            qvec = embedding.embed_query(c.intent_text)
-        else:
-            qvec = embedding.embed_texts([c.intent_text])[0]
-        embed_q_ms = (time.time() - t1) * 1000
+        # gold validation (비교 가능한 실험의 필수)
+        if c.expected_doc_ids:
+            missing = [x for x in c.expected_doc_ids if x not in docs_map]
+            if missing:
+                n_bad_gold += 1
+                case_payload["status"] = "BAD_GOLD"
+                case_payload["missing_expected_doc_ids"] = missing
+                logger.log("case", case_payload)
+                continue
 
-        # Stage 2: dense retrieval
-        t2 = time.time()
-        top_k_dense = int(pipeline.params.get("top_k_dense") or pipeline.params.get("top_k") or 50)
-        dense = vec_retriever.query(qvec, top_k=top_k_dense)
-        dense_ms = (time.time() - t2) * 1000
+        # Stage: dense
+        embed_q_ms = 0.0
+        dense_ms = 0.0
+        dense: List[ScoredDoc] = []
+        if use_dense:
+            if embedding is None or vec_retriever is None:
+                raise RuntimeError("[GUARD] use_dense=True인데 embedding/vec_retriever가 준비되지 않음")
+            t1 = time.time()
+            if hasattr(embedding, "embed_query"):
+                qvec = embedding.embed_query(intent_text)  # type: ignore[attr-defined]
+            else:
+                qvec = embedding.embed_texts([intent_text])[0]
+            embed_q_ms = (time.time() - t1) * 1000
 
-        # Stage 2.5: sparse retrieval (BM25)
+            t2 = time.time()
+            top_k_dense = int(pipeline.params.get("top_k_dense") or pipeline.params.get("top_k") or 50)
+            dense = vec_retriever.query(qvec, top_k=top_k_dense)
+            dense_ms = (time.time() - t2) * 1000
+
+        # Stage: bm25
         sparse: List[ScoredDoc] = []
-        if "bm25" in pipeline.steps:
+        bm25_ms = 0.0
+        bm25_query_text = ""
+        if use_bm25:
             t3 = time.time()
             top_k_bm25 = int(pipeline.params.get("top_k_bm25") or 50)
-            sparse = bm25.query(c.intent_text, top_k=top_k_bm25)
-            bm25_ms = (time.time() - t3) * 1000
-        else:
-            bm25_ms = 0.0
 
-        # Stage 3: fusion
-        fused: List[ScoredDoc]
+            # ✅ BM25 query text (NO leakage): bm25_query_text -> intent_text -> raw_text
+            bm25_query_text = _pick_text(getattr(c, "bm25_query_text", ""), intent_text, c.raw_text)
+            case_payload["bm25_query_text"] = bm25_query_text
+
+            sparse = bm25.query(bm25_query_text, top_k=top_k_bm25)
+            bm25_ms = (time.time() - t3) * 1000
+
+            # 디버그용(원하면 유지)
+            case_payload["top5_bm25_doc_ids"] = [sd.doc_id for sd in sparse[:5]]
+
+        # Stage: fusion
         if "fusion" in pipeline.steps:
             fusion_cfg = pipeline.params.get("fusion") or {}
             method = (fusion_cfg.get("method") or "rrf").lower()
             top_k_fused = int(pipeline.params.get("top_k_fused") or 50)
             if method == "rrf":
                 fused = rrf_fusion(dense, sparse, rrf_k=int(fusion_cfg.get("rrf_k") or 60), top_k=top_k_fused)
-            elif method in {"weighted", "alpha"}:
+            else:
                 alpha = float(fusion_cfg.get("alpha") or pipeline.params.get("alpha") or 0.5)
                 fused = weighted_fusion(dense, sparse, alpha=alpha, top_k=top_k_fused)
-            else:
-                fused = rrf_fusion(dense, sparse, rrf_k=60, top_k=top_k_fused)
         else:
-            fused = dense
+            fused = dense if use_dense else sparse
 
-        # Stage 4: rerank
-        reranked: List[ScoredDoc] = fused
+        # Stage: rerank
+        reranked = fused
         rerank_ms = 0.0
         if "rerank" in pipeline.steps:
+            if reranker is None:
+                raise RuntimeError("[GUARD] rerank step인데 reranker가 None")
             t4 = time.time()
             rerank_top_k = int(pipeline.params.get("rerank_top_k") or 20)
-            # build docs list for rerank topN
             candidate_ids = [sd.doc_id for sd in fused[:rerank_top_k]]
             candidate_docs = [docs_map[i] for i in candidate_ids if i in docs_map]
-            rr = reranker.rerank(c.intent_text, candidate_docs, top_k=len(candidate_docs))
-            # Keep rerank order and score
-            reranked = rr
+            reranked = reranker.rerank(intent_text, candidate_docs, top_k=len(candidate_docs))
             rerank_ms = (time.time() - t4) * 1000
 
-        # Stage 5: filtering
+        # Stage: filter
         final = reranked
         if "filter" in pipeline.steps:
             filt = pipeline.params.get("filter") or {}
@@ -201,14 +261,18 @@ def run_benchmark(
 
         pred_ids = [sd.doc_id for sd in final]
 
-        # Metrics
-        cm = {
-            "precision@10": precision_at_k(pred_ids, c.expected_doc_ids, 10),
-            "recall@10": recall_at_k(pred_ids, c.expected_doc_ids, 10),
-            "mrr": mrr(pred_ids, c.expected_doc_ids),
-            "ndcg@10": ndcg_at_k(pred_ids, c.expected_doc_ids, 10),
-        }
-        per_case_metrics.append(cm)
+        # ✅ Top5는 항상 final 기준(비교 일관성)
+        case_payload["top5_doc_ids"] = pred_ids[:5]
+
+        cm = None
+        if c.expected_doc_ids:
+            cm = {
+                "precision@10": precision_at_k(pred_ids, c.expected_doc_ids, 10),
+                "recall@10": recall_at_k(pred_ids, c.expected_doc_ids, 10),
+                "mrr": mrr(pred_ids, c.expected_doc_ids),
+                "ndcg@10": ndcg_at_k(pred_ids, c.expected_doc_ids, 10),
+            }
+            per_case_metrics.append(cm)
 
         case_payload.update(
             {
@@ -242,34 +306,33 @@ def run_benchmark(
         "n_cases": len(cases),
         "n_eval": summary.n_eval,
         "n_skipped": n_skipped,
-        "metrics": summary.as_dict(),
+        "n_bad_gold": n_bad_gold,
+        "metrics": summary.as_dict() if summary.n_eval > 0 else None,
     }
 
     write_json(art.summary_json_path, summary_obj)
 
-    # Simple markdown report
     report = f"""# Intent Vector/Hybrid Lab Report
 
 - Run ID: `{art.run_id}`
 - Vendor Set: `{vendor_set.vendor_set_id}`
 - Pipeline: `{pipeline.pipeline_id}`
 - Docs: {len(docs)}
-- Cases: {len(cases)} (eval={summary.n_eval}, skipped={n_skipped})
+- Cases: {len(cases)} (eval={summary.n_eval}, skipped={n_skipped}, bad_gold={n_bad_gold})
 
 ## Metrics (mean)
 
-| Metric | Value |
+{"(no metrics)" if summary.n_eval == 0 else f"""| Metric | Value |
 |---|---:|
 | Precision@10 | {summary_obj['metrics']['precision@10']:.4f} |
 | Recall@10 | {summary_obj['metrics']['recall@10']:.4f} |
 | MRR | {summary_obj['metrics']['mrr']:.4f} |
-| nDCG@10 | {summary_obj['metrics']['ndcg@10']:.4f} |
+| nDCG@10 | {summary_obj['metrics']['ndcg@10']:.4f} |"""}
 
 ## Artifacts
 
 - detail: `{Path(art.detail_jsonl_path).name}`
 - summary: `{Path(art.summary_json_path).name}`
-
 """
     Path(art.report_md_path).write_text(report, encoding="utf-8")
 
