@@ -104,7 +104,13 @@ python scripts\run_benchmark.py ^
   --out runs
 ```
 
+#인덱싱
+```bash
+set OPENAI_API_KEY=sk-xxx
+set QDRANT_URL=http://localhost:6333
+set ELASTIC_URL=http://localhost:9200
 
-
+python scripts\index_external_hybrid.py
+```
 
 
