@@ -81,6 +81,7 @@ ivhl run --pipeline-id hybrid_rerank_filter --vendor-set openai_only --catalog d
 [BM25 only]
 
 # BM25-only 실행 
+```bash
 python scripts\run_benchmark.py ^
   --vendors templates\vendors.example.yaml ^
   --pipelines templates\pipeline.example.yaml ^
@@ -89,8 +90,10 @@ python scripts\run_benchmark.py ^
   --catalog data\catalog.30cat.v3.tsv ^
   --testcases templates\testcases.v6.tsv ^
   --out runs
+```
 
-#노이즈 
+#노이즈
+```bash
 python scripts\run_benchmark.py ^
   --vendors templates\vendors.example.yaml ^
   --pipelines templates\pipeline.example.yaml ^
@@ -99,7 +102,7 @@ python scripts\run_benchmark.py ^
   --catalog data\catalog.30cat.v3.tsv ^
   --testcases templates\testcases.v6.noisy.tsv ^
   --out runs
-
+```
 
 
 
