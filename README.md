@@ -74,3 +74,43 @@ ivhl run --pipeline-id hybrid --vendor-set google_only --catalog data/catalog.ex
 ```bash
 ivhl run --pipeline-id hybrid_rerank_filter --vendor-set openai_only --catalog data/catalog.example.tsv --testcases templates/testcases.example.tsv --out-dir runs
 ```
+
+---------------------------------------------------------------------------------------------------------------
+
+### 테스트 실행방법
+[BM25 only]
+
+# BM25-only 실행 
+```bash
+python scripts\run_benchmark.py ^
+  --vendors templates\vendors.example.yaml ^
+  --pipelines templates\pipeline.example.yaml ^
+  --vendor-set bm25_local ^
+  --pipeline bm25_only ^
+  --catalog data\catalog.30cat.v3.tsv ^
+  --testcases templates\testcases.v6.tsv ^
+  --out runs
+```
+
+#노이즈
+```bash
+python scripts\run_benchmark.py ^
+  --vendors templates\vendors.example.yaml ^
+  --pipelines templates\pipeline.example.yaml ^
+  --vendor-set bm25_local ^
+  --pipeline bm25_only ^
+  --catalog data\catalog.30cat.v3.tsv ^
+  --testcases templates\testcases.v6.noisy.tsv ^
+  --out runs
+```
+
+#인덱싱
+```bash
+set OPENAI_API_KEY=sk-xxx
+set QDRANT_URL=http://localhost:6333
+set ELASTIC_URL=http://localhost:9200
+
+python scripts\index_external_hybrid.py
+```
+
+
