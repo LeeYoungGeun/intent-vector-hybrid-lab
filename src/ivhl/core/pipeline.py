@@ -4,16 +4,16 @@ import shutil
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
 
-from ivhl.adapters.bm25 import LocalBM25
+from ivhl.adapters.bm25 import LocalBM25, ElasticBM25Retriever
 from ivhl.adapters.embedding import build_embedding_adapter
 from ivhl.adapters.filtering import FilterRules, apply_filters
 from ivhl.adapters.fusion import rrf_fusion, weighted_fusion
 from ivhl.adapters.rerank import build_reranker
-from ivhl.adapters.retrieval import BruteForceVectorRetriever
+from ivhl.adapters.retrieval import BruteForceVectorRetriever, QdrantVectorRetriever
 from ivhl.core.config import PipelineSpec, VendorSet
 from ivhl.core.io import load_catalog_tsv, load_testcases_tsv
 from ivhl.core.metrics import aggregate, mrr, ndcg_at_k, precision_at_k, recall_at_k
@@ -60,15 +60,10 @@ def _docs_by_id(docs: List[Document]) -> Dict[str, Document]:
     return {d.doc_id: d for d in docs}
 
 
-def _assert_bm25_only_config(vendor_set: VendorSet, pipeline: PipelineSpec) -> None:
+def _assert_bm25_only_config(_vendor_set: VendorSet, pipeline: PipelineSpec) -> None:
+    # bm25_only는 "dense/fusion/rerank 금지"만 강제한다.
     if pipeline.pipeline_id != "bm25_only":
         return
-    emb = (vendor_set.config.get("embedding") or {"provider": "mock"})
-    if emb.get("provider") != "mock":
-        raise RuntimeError(
-            f"[GUARD] bm25_only인데 embedding provider가 mock이 아님: "
-            f"vendor_set={vendor_set.vendor_set_id}, embedding={emb}"
-        )
     forbidden = {"dense", "fusion", "rerank"}
     bad = forbidden.intersection(set(pipeline.steps))
     if bad:
@@ -84,6 +79,13 @@ def _pick_text(*cands: str) -> str:
     return ""
 
 
+def _get_env(cfg: Dict[str, Any], key: str, default: str = "") -> str:
+    env_key = (cfg.get(key) or "").strip()
+    if not env_key:
+        return default
+    return (os.environ.get(env_key) or "").strip()  # type: ignore[name-defined]
+
+
 def run_benchmark(
     *,
     vendor_set: VendorSet,
@@ -94,6 +96,8 @@ def run_benchmark(
     pipelines_yaml: str | Path,
     out_dir: str | Path,
 ) -> RunArtifacts:
+    import os  # local import to avoid accidental shadowing above
+
     load_dotenv()
 
     art = prepare_run(out_dir)
@@ -111,27 +115,56 @@ def run_benchmark(
     if "fusion" in pipeline.steps and not (use_dense and use_bm25):
         raise RuntimeError(f"[GUARD] fusion은 dense+bm25 둘 다 필요: steps={pipeline.steps}")
 
-    # Build adapters only when needed
+    # ---- Build embedding (query embedding always needed for dense)
     embedding = None
-    vec_retriever: BruteForceVectorRetriever | None = None
     embed_docs_ms = 0.0
+
+    # ---- Build vector retriever (local brute-force OR qdrant)
+    vec_retriever: Optional[Any] = None
 
     if use_dense:
         emb_cfg = (vendor_set.config.get("embedding") or {"provider": "mock"})
         embedding = build_embedding_adapter(emb_cfg)
 
-        t0 = time.time()
-        doc_texts = [(d.title + " " + d.text).strip() for d in docs]
-        if hasattr(embedding, "embed_documents"):
-            doc_vecs_list = embedding.embed_documents(doc_texts)  # type: ignore[attr-defined]
+        vdb_cfg = (vendor_set.config.get("vector_db") or {"provider": "local"})
+        vdb_provider = (vdb_cfg.get("provider") or "local").lower()
+
+        if vdb_provider == "qdrant":
+            qdrant_url = (os.environ.get(vdb_cfg.get("endpoint_env") or "") or "").strip()
+            qdrant_key = (os.environ.get(vdb_cfg.get("api_key_env") or "") or "").strip()
+            collection = (vdb_cfg.get("index") or "products").strip()
+            if not qdrant_url:
+                raise RuntimeError("[GUARD] vector_db.provider=qdrant 인데 QDRANT_URL(env)이 비어있음")
+            vec_retriever = QdrantVectorRetriever(url=qdrant_url, collection=collection, api_key=qdrant_key)
         else:
-            doc_vecs_list = embedding.embed_texts(doc_texts)
-        doc_vecs = {d.doc_id: v for d, v in zip(docs, doc_vecs_list)}
-        embed_docs_ms = (time.time() - t0) * 1000
-        vec_retriever = BruteForceVectorRetriever(docs=docs, doc_vecs=doc_vecs)
+            # local brute-force: embed all docs once
+            t0 = time.time()
+            doc_texts = [(d.title + " " + d.text).strip() for d in docs]
+            if hasattr(embedding, "embed_documents"):
+                doc_vecs_list = embedding.embed_documents(doc_texts)  # type: ignore[attr-defined]
+            else:
+                doc_vecs_list = embedding.embed_texts(doc_texts)
+            doc_vecs = {d.doc_id: v for d, v in zip(docs, doc_vecs_list)}
+            embed_docs_ms = (time.time() - t0) * 1000
+            vec_retriever = BruteForceVectorRetriever(docs=docs, doc_vecs=doc_vecs)
 
-    bm25 = LocalBM25(docs=docs)
+    # ---- Build BM25 retriever (local OR elastic)
+    bm25_retriever: Optional[Any] = None
+    if use_bm25:
+        bm25_cfg = (vendor_set.config.get("bm25") or {"provider": "builtin"})
+        bm25_provider = (bm25_cfg.get("provider") or "builtin").lower()
 
+        if bm25_provider == "elastic":
+            elastic_url = (os.environ.get(bm25_cfg.get("endpoint_env") or "") or "").strip()
+            elastic_key = (os.environ.get(bm25_cfg.get("api_key_env") or "") or "").strip()
+            index = (bm25_cfg.get("index") or "products").strip()
+            if not elastic_url:
+                raise RuntimeError("[GUARD] bm25.provider=elastic 인데 ELASTIC_URL(env)이 비어있음")
+            bm25_retriever = ElasticBM25Retriever(docs=docs, base_url=elastic_url, index=index, api_key=elastic_key)
+        else:
+            bm25_retriever = LocalBM25(docs=docs)
+
+    # ---- Optional reranker
     reranker = None
     if "rerank" in pipeline.steps:
         rerank_cfg = (vendor_set.config.get("rerank") or {"provider": "mock"})
@@ -155,12 +188,16 @@ def run_benchmark(
 
     for c in cases:
         intent_text = _pick_text(c.intent_text, c.raw_text)
+        bm25_query_text = _pick_text(getattr(c, "bm25_query_text", "") or "", intent_text, c.raw_text)
+
+        # ✅ 공정 비교: dense/bm25 모두 동일한 query_text 규칙 사용
+        query_text_for_retrieval = bm25_query_text
 
         case_payload: Dict[str, Any] = {
             "case_id": c.case_id,
             "raw_text": c.raw_text,
             "intent_text": intent_text,
-            "bm25_query_text": getattr(c, "bm25_query_text", "") or "",
+            "bm25_query_text": bm25_query_text,
             "expected_doc_ids": c.expected_doc_ids,
             "expected_category": c.expected_category,
             "needs_clarification": c.needs_clarification,
@@ -175,7 +212,6 @@ def run_benchmark(
             logger.log("case", case_payload)
             continue
 
-        # gold validation (비교 가능한 실험의 필수)
         if c.expected_doc_ids:
             missing = [x for x in c.expected_doc_ids if x not in docs_map]
             if missing:
@@ -185,18 +221,19 @@ def run_benchmark(
                 logger.log("case", case_payload)
                 continue
 
-        # Stage: dense
+        # ---- Dense
         embed_q_ms = 0.0
         dense_ms = 0.0
         dense: List[ScoredDoc] = []
         if use_dense:
             if embedding is None or vec_retriever is None:
                 raise RuntimeError("[GUARD] use_dense=True인데 embedding/vec_retriever가 준비되지 않음")
+
             t1 = time.time()
             if hasattr(embedding, "embed_query"):
-                qvec = embedding.embed_query(intent_text)  # type: ignore[attr-defined]
+                qvec = embedding.embed_query(query_text_for_retrieval)  # type: ignore[attr-defined]
             else:
-                qvec = embedding.embed_texts([intent_text])[0]
+                qvec = embedding.embed_texts([query_text_for_retrieval])[0]
             embed_q_ms = (time.time() - t1) * 1000
 
             t2 = time.time()
@@ -204,25 +241,19 @@ def run_benchmark(
             dense = vec_retriever.query(qvec, top_k=top_k_dense)
             dense_ms = (time.time() - t2) * 1000
 
-        # Stage: bm25
+        # ---- BM25
         sparse: List[ScoredDoc] = []
         bm25_ms = 0.0
-        bm25_query_text = ""
         if use_bm25:
+            if bm25_retriever is None:
+                raise RuntimeError("[GUARD] use_bm25=True인데 bm25_retriever가 None")
             t3 = time.time()
             top_k_bm25 = int(pipeline.params.get("top_k_bm25") or 50)
-
-            # ✅ BM25 query text (NO leakage): bm25_query_text -> intent_text -> raw_text
-            bm25_query_text = _pick_text(getattr(c, "bm25_query_text", ""), intent_text, c.raw_text)
-            case_payload["bm25_query_text"] = bm25_query_text
-
-            sparse = bm25.query(bm25_query_text, top_k=top_k_bm25)
+            sparse = bm25_retriever.query(bm25_query_text, top_k=top_k_bm25)
             bm25_ms = (time.time() - t3) * 1000
-
-            # 디버그용(원하면 유지)
             case_payload["top5_bm25_doc_ids"] = [sd.doc_id for sd in sparse[:5]]
 
-        # Stage: fusion
+        # ---- Fusion (Hybrid)
         if "fusion" in pipeline.steps:
             fusion_cfg = pipeline.params.get("fusion") or {}
             method = (fusion_cfg.get("method") or "rrf").lower()
@@ -235,7 +266,7 @@ def run_benchmark(
         else:
             fused = dense if use_dense else sparse
 
-        # Stage: rerank
+        # ---- Rerank
         reranked = fused
         rerank_ms = 0.0
         if "rerank" in pipeline.steps:
@@ -245,10 +276,10 @@ def run_benchmark(
             rerank_top_k = int(pipeline.params.get("rerank_top_k") or 20)
             candidate_ids = [sd.doc_id for sd in fused[:rerank_top_k]]
             candidate_docs = [docs_map[i] for i in candidate_ids if i in docs_map]
-            reranked = reranker.rerank(intent_text, candidate_docs, top_k=len(candidate_docs))
+            reranked = reranker.rerank(query_text_for_retrieval, candidate_docs, top_k=len(candidate_docs))
             rerank_ms = (time.time() - t4) * 1000
 
-        # Stage: filter
+        # ---- Filter
         final = reranked
         if "filter" in pipeline.steps:
             filt = pipeline.params.get("filter") or {}
@@ -260,8 +291,6 @@ def run_benchmark(
             final = apply_filters(final, docs_map, rules=rules, expected_category=c.expected_category)
 
         pred_ids = [sd.doc_id for sd in final]
-
-        # ✅ Top5는 항상 final 기준(비교 일관성)
         case_payload["top5_doc_ids"] = pred_ids[:5]
 
         cm = None

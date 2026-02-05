@@ -29,6 +29,7 @@ class QueryCase:
 class ScoredDoc:
     doc_id: str
     score: float
+    source: str = ""   # ✅ 추가 (dense/bm25/fused 등 표시용)
     extra: Dict[str, str] = field(default_factory=dict)
 
 
