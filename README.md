@@ -118,8 +118,8 @@ python scripts\index_external_hybrid.py
 
 #bm25 + dense + hybrid 실행 방법 
 
-'''bash
+```bash
 ivhl run --vendor-set ext_qdrant_elastic --pipeline-id bm25_only  --catalog data\catalog.30cat.v3.tsv --testcases templates\testcases.v7.noisy.tsv --out-dir runs
 ivhl run --vendor-set ext_qdrant_elastic --pipeline-id dense_only --catalog data\catalog.30cat.v3.tsv --testcases templates\testcases.v7.noisy.tsv --out-dir runs
 ivhl run --vendor-set ext_qdrant_elastic --pipeline-id hybrid_rrf --catalog data\catalog.30cat.v3.tsv --testcases templates\testcases.v7.noisy.tsv --out-dir runs
-'''
+```
